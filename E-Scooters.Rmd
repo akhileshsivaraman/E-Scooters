@@ -1,0 +1,440 @@
+---
+title: "E-Scooters"
+output: 
+  ioslides_presentation:
+    css: styles.css
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, include = FALSE, comment = "", cache = TRUE, message = FALSE)
+```
+
+```{r message=FALSE}
+# load libraries
+library(tidyverse)
+library(lubridate)
+library(kableExtra)
+library(forecast)
+
+#read data
+scooters <- read_csv("data.csv")
+```
+
+## Cleaning and validation \| Season
+
+::: {style="margin-top: -30px;"}
+```{r include=TRUE}
+kable(scooters[c(1),c(1:3)]) |>
+  kable_minimal(lightable_options = "striped", font_size = 14, full_width = T)
+```
+:::
+
+\
+\
+\
+
+-   The information pack lists season code 1 as spring so January would be in spring.
+-   This is not the case in either hemisphere so the codes are incorrectly ordered.
+-   I calculated the average temperature by season to determine the correct order of the season codes.
+
+```{r}
+str(scooters)
+# check average temperature by season
+mean_seasonal_temperature <- aggregate(scooters$temp, by = list(scooters$season), FUN = mean) |>
+  `colnames<-`(c("season code", "mean temperature"))
+```
+
+```{r include=TRUE}
+kable(mean_seasonal_temperature) |>
+  kable_minimal(lightable_options = "striped", font_size = 14, full_width = T)
+```
+
+\
+\
+\
+
+-   Summer, being the hottest season, should be coded as 3 while winter should be 1.
+-   Subsequently, spring is 2 and autumn is 4.
+
+```{r}
+# replace the codes with the names of the seasons
+scooters <- scooters |>
+  mutate(season = recode(season, "1"="Winter", "2"="Spring", "3"="Summer", "4"="Autumn"))
+```
+
+## Cleaning and validation \| Holiday or Working Day
+
+```{r include=TRUE}
+kable(scooters[c(1),c(1:5)]) |>
+  kable_minimal(lightable_options = "striped", font_size = 14, full_width = T)
+```
+
+\
+\
+\
+
+-   January 1st is not listed as a holiday but in many countries, it is a public holiday.
+-   Using `wday()` from `lubridate`, I checked which day of the week January 1st landed on in 2011 and 2012. It was a Saturday and a Sunday, respectively.
+-   As such, I expected 3rd January 2011 and 2nd January 2012 to be listed as holidays. However, only the latter was.
+-   As I do not know which country the data is from, I have left these columns as they are.
+
+```{r}
+# identify rows with data from the 1st of January
+Jan1st <- grep(pattern = "01-01", scooters$date)
+Jan1st_data <- scooters[c(Jan1st),]
+
+# determine which day of the week Jan 1st landed on
+wday(Jan1st_data$date, label = T)
+
+# check the first Monday of 2011 and 2012
+Jan3rd2011 <- grep(pattern = "2011-01-03", scooters$date)
+Jan3rd2011_data <- scooters[c(Jan3rd2011),]
+wday(Jan3rd2011_data$date, label = T)
+Jan3rd2011_data$holiday
+
+Jan2nd2012 <- grep(pattern = "2012-01-02", scooters$date)
+Jan2nd2012_data <- scooters[c(Jan2nd2012),]
+wday(Jan2nd2012_data$date, label = T)
+Jan2nd2012_data$holiday
+```
+
+## Cleaning and validation \| Aggregating by date and verifying the distribution
+
+::: {style="float: left; width: 30%; margin-top: 10px"}
+-   Shapiro-Wilk test indicated the daily rental data are not normally distributed (w = 0.980, p = 2.08x10^-8^).
+-   Histogram and quantile plots of the data show that the distribution is approximately normal.
+-   The subsequent analysis will assume the data is normally distributed.
+:::
+
+```{r}
+# aggregate the data by date
+daily_rentals_data <- aggregate(scooters$rentals, by = list(scooters$date, scooters$season), FUN = sum) |>
+  `colnames<-`(c("date", "season", "daily rentals")) |>
+  arrange(date)
+
+# shapiro-wilk test
+shapiro.test(daily_rentals_data$`daily rentals`)
+```
+
+::: {style="float: right; width: 70%; margin-top: -20px;"}
+```{r include=TRUE, fig.show='hold', out.width="75%", out.height=c("50%", "50%"), fig.align="center"}
+par(mar = c(7,5,3,0))
+
+# histogram 
+hist(daily_rentals_data$`daily rentals`, 
+     xlab = "daily rentals",
+     ylab = "frequency",
+     main = "",
+     cex.lab = 1.6,
+     cex.axis = 1.6)
+
+# quantile plot
+qqnorm(daily_rentals_data$`daily rentals`,
+       main = "",
+       cex.lab = 1.6,
+       cex.axis = 1.6)
+qqline(daily_rentals_data$`daily rentals`)
+```
+:::
+
+## Daily Rental Statistics \| Methods
+
+-   As the data are normally distributed, the mean is used to calculate the average number of daily rentals
+-   The summary statistics per season calculated are:
+    -   sample size
+    -   total sum of e-scooters rented
+    -   mean
+    -   standard deviation
+    -   minimum and maximum
+-   Significance testing of the means is first carried out using a pairwise t-test across seasons and then two sample t-tests.
+-   Significance testing of the variance is carried out with Levene's test and F-tests.
+-   Pearson's correlation coefficient is used to measure correlations.
+
+## Daily Rental Statistics \| Summary
+
+```{r}
+# calculate sample size for each season
+season_samples <- count(daily_rentals_data, season, name = "sample size")
+
+
+# calculate summary statistics
+operations <- c("sum", "mean", "sd", "min", "max")
+
+summary_statistics <- list(season_samples)
+for (i in operations) {
+  assign(paste0(i, "_daily_rentals"),
+         aggregate(daily_rentals_data$`daily rentals`, by = list(daily_rentals_data$season), FUN = i) |>
+           `colnames<-`(c("season", paste0(i))))
+}
+
+summary_statistics <- season_samples |>
+  left_join(sum_daily_rentals) |>
+  left_join(mean_daily_rentals) |>
+  left_join(sd_daily_rentals) |>
+  left_join(min_daily_rentals) |>
+  left_join(max_daily_rentals) |>
+  mutate(mean = round(mean, 0)) |>
+  mutate(sd = round(sd, 0))
+```
+
+-   Summer saw the greatest number of rentals followed by spring, autumn and, finally, winter.
+-   Summer averaged 2.2x more daily rentals than winter. This is a statistically significant difference (two sample t-test: t = -20.421, df = 366.99, p-value = 2.2e-16).
+-   Spring had a slightly higher average number of daily rentals than autumn. This is not statistically significant (two sample t-test: t = -1.48, df = 359.55, p-value = 0.1398).
+-   The standard deviation of the average number of daily rentals is highest for autumn followed by spring, summer and winter.
+
+```{r include=TRUE}
+kable(summary_statistics) |>
+  kable_minimal(lightable_options = "striped", font_size = 14, full_width = T)
+```
+
+## Daily Rental Statistics \| Summary
+
+```{r}
+# pairwise t-test
+pairwise.t.test(daily_rentals_data$`daily rentals`, daily_rentals_data$season, p.adjust.method = )
+
+# two sample t-tests
+seasonal_distributions <- daily_rentals_data |>
+  pivot_wider(names_from = season, 
+              values_from = `daily rentals`)
+t.test(seasonal_distributions$Winter, seasonal_distributions$Summer, na.rm = T)
+t.test(seasonal_distributions$Autumn, seasonal_distributions$Spring, na.rm = T)
+
+# levene's test
+car::leveneTest(daily_rentals_data$`daily rentals` ~ daily_rentals_data$season)
+
+# F-test
+var.test(seasonal_distributions$Winter, seasonal_distributions$Spring, na.rm = T)
+var.test(seasonal_distributions$Summer, seasonal_distributions$Spring, na.rm = T)
+var.test(seasonal_distributions$Autumn, seasonal_distributions$Summer, na.rm = T)
+var.test(seasonal_distributions$Winter, seasonal_distributions$Summer, na.rm = T)
+var.test(seasonal_distributions$Autumn, seasonal_distributions$Spring, na.rm = T)
+var.test(seasonal_distributions$Autumn, seasonal_distributions$Winter, na.rm = T)
+```
+
+-   Summer and winter have similar standard deviations, as do spring and autumn.
+-   There is a significant difference between spring's sd and summer and winter's. Similarly, autumn's sd is significantly different to summer and winter's.
+
+|        |           |           |           |        |
+|--------|-----------|-----------|-----------|--------|
+|        | Spring    | Summer    | Autumn    | Winter |
+| Spring | \-        |           |           |        |
+| Summer | **0.041** | \-        |           |        |
+| Autumn | 0.976     | **0.040** | \-        |        |
+| Winter | **0.010** | 0.572     | **0.010** | \-     |
+
+\
+\
+Pairwise F-test p-values. Statistically significant values in bold.
+
+## Daily Rental Statistics \| Summary
+
+```{r}
+# boxplot
+# separate seasons by year
+daily_rentals_data$season_year <- 0
+for (i in 1:nrow(daily_rentals_data)){
+  year <- format(daily_rentals_data$date[i], format = "%Y")
+  season_year <- paste0(daily_rentals_data$season[i], year)
+  daily_rentals_data$season_year[i] <- season_year
+}
+
+# order seasons
+daily_rentals_data$season_year <- factor(daily_rentals_data$season_year,
+                                         c("Winter2011", "Spring2011", "Summer2011", "Autumn2011", "Winter2012", "Spring2012", "Summer2012", "Autumn2012"))
+```
+
+```{r include=TRUE, out.height="100%", out.width="100%"}
+ggplot(daily_rentals_data) +
+  geom_boxplot(aes(season_year, `daily rentals`, colour = season)) +
+  theme_classic() +
+  scale_x_discrete(labels = function(`season_year`) str_wrap(`season_year`, width = 4)) +
+  xlab("season") +
+  theme(legend.position = "top")
+# we can now see that there has been an increase between 2011 and 2012 so a lot of a variation we observe within each season could be a result of the e-scooters becoming more popular and/or widespread
+```
+
+## Daily Rental Statistics \| What might be driving seasonal variation?
+
+```{r}
+seasonal_factor <- function(x) {
+  average <- aggregate(scooters[[x]], by = list(scooters$season), FUN = mean) |>
+    `colnames<-`(c("season", paste0("mean_", x)))
+  
+  variation <- aggregate(scooters[[x]], by = list(scooters$season), FUN = sd) |>
+    `colnames<-`(c("season", paste0("sd_", x)))
+  
+  d <- average |>
+    left_join(variation) |>
+    left_join(mean_daily_rentals) |>
+    rename(mean_daily_rentals = mean) |>
+    mutate(upper = .data[[paste0("mean_", x)]] + .data[[paste0("sd_", x)]]) |>
+    mutate(lower = .data[[paste0("mean_", x)]] - .data[[paste0("sd_", x)]])
+  
+  ggplot(d) +
+    geom_point(aes(x = .data[["mean_daily_rentals"]], y = .data[[paste0("mean_", x)]], colour = season)) +
+    geom_linerange(aes(x = .data[["mean_daily_rentals"]], ymin = lower, ymax = upper, colour = season)) +
+    theme_classic() +
+    xlab("mean daily rentals") +
+    ylab(paste0("mean ", x)) +
+    theme(legend.position = "none")
+}
+
+weather_plot <- seasonal_factor("weather")
+temp_plot <- seasonal_factor("temp")
+humidity_plot <- seasonal_factor("humidity")
+wind_plot <- seasonal_factor("windspeed")
+
+seasonal_plots <- cowplot::plot_grid(weather_plot,
+                                     temp_plot,
+                                     humidity_plot,
+                                     wind_plot,
+                                     nrow = 2,
+                                     ncol = 2)
+legend <- cowplot::get_legend(weather_plot +
+                              theme(legend.position = "top"))
+```
+
+```{r include=TRUE, fig.show="hold"}
+cowplot::plot_grid(legend, seasonal_plots, ncol = 1, rel_heights = c(0.1, 1))
+```
+
+## Daily Rental Statistics \| Temperature
+
+::: {style="float: left; width: 40%;"}
+-   There appears to be a positive relationship between temperature and mean daily rentals. Testing for correlation, we obtain a Pearson's r of 0.90 (t = 3.006, df = 2, p-value = 0.09514). It is not statistically significant but there is a strong correlation.\
+    \
+-   Similarly, there is a strong correlation between "feels like" temperature and mean daily rentals (r = 0.92, t = 3.2399, df = 2, p-value = 0.0835) that is statistically non-significant.
+:::
+
+```{r}
+# temp
+seasonal_temp <- seasonal_factor("temp")
+cor.test(seasonal_temp$data$mean_daily_rentals, seasonal_temp$data$mean_temp)
+
+# atemp
+seasonal_atemp <- seasonal_factor("atemp")
+cor.test(seasonal_atemp$data$mean_daily_rentals, seasonal_atemp$data$mean_atemp)
+```
+
+::: {style="float: left; width: 60%;"}
+```{r include=TRUE, fig.show='hold', out.width="90%", out.height=c("50%", "50%"), fig.align="right"}
+plot(seasonal_temp + theme(legend.position = "top",
+                                         text = element_text(size = 15)))
+plot(seasonal_atemp + theme(text = element_text(size = 15)))
+```
+:::
+
+## Predicting Daily Rentals \| Time Series Analysis
+
+1.  Plot the time series to visualise the overall trends in the data.
+2.  Decompose the series to estimate trends and seasonal effects using a moving average method.
+3.  Calculate autocorrelation and partial autocorrelation to define the relationship between a variable and itself at previous time points.
+4.  Apply an ARIMA model that can then be used to predict daily rentals.
+
+## Predicting Daily Rentals \| Time Series Analysis
+
+<ol>
+  <li value="1">
+Plot the time series to visualise the overall trends in the data.\
+  </li>
+</ol>
+
+Daily rentals increases from the start of the year, peaks in the summer and falls with there being an increase in daily rentals between 2011 and 2012.
+
+<br> <br>
+
+```{r include=TRUE, out.height="60%", fig.show="hold"}
+ggplot(daily_rentals_data) +
+  geom_point(aes(date, `daily rentals`), alpha = 0.5) +
+  geom_smooth(aes(date, `daily rentals`), colour = "#8B0000", se = F) +
+  theme_classic()
+```
+
+## Predicting Daily Rentals \| Time Series Analysis
+
+<ol>
+  <li value="2">
+Decompose the series to estimate trends and seasonal effects using a moving average method.\
+  </li>
+</ol>
+
+There is trend for daily rentals to grow and we see some troughs either side of summer 2011 and summer 2012.
+
+<br> <br>
+
+```{r}
+time_series <- ts(daily_rentals_data$`daily rentals`, frequency = 365, start = 2011) # frequency = 365 as the frequency of the observations is daily
+decomposed_ts <- decompose(time_series)
+# the random component is the part of the time series that can't be attributed to the trend or seasonal components. It has a mean of 0.
+```
+
+```{r include=TRUE}
+plot(decomposed_ts)
+```
+
+## Predicting Daily Rentals \| Time Series Analysis
+
+<ol>
+  <li value="3">
+Calculate autocorrelation and partial autocorrelation to define the relationship between a variable and itself at previous time points.\
+  </li>
+</ol>
+
+
+The autocorrelation plot indicates that for the next 30 time points, the value at time point x will have a strong influence. But, the partial autocorrelation tells us that beyond 7 time points from x, there is a lot of noise associated with correlations from the intervening time points.\
+
+<br> <br>
+
+```{r}
+autocorrelation_ts <- acf(time_series)
+```
+
+```{r include=TRUE, out.height=c("50%", "50%"), out.width=c("50%", "50%")}
+plot(autocorrelation_ts, main = "daily rentals autocorrelogram")
+pacf(time_series, main = "daily rentals partial autocorrelogram")
+```
+
+## Predicting Daily Rentals \| Time Series Analysis
+
+<ol>
+  <li value="4">
+Apply an ARIMA model that can then be used to predict daily rentals.\
+  </li>
+</ol>
+
+AR - autoregressive: using previous values to predict future values.\
+I - integrated: applying a transformation to make the mean of the time series stationary.\
+MA - moving-average model: incorporating error terms for forecasting.\
+
+<br> <br>
+
+```{r}
+# transform the time series to make it stationary so that a model can be applied
+ndiffs(time_series)
+stationary_ts <- diff(time_series, 1)
+# plot(stationary_ts)
+
+# apply an ARIMA model
+rentals_model <- auto.arima(y = time_series)
+rentals_model
+
+# check it is stationary - https://statisticsbyjim.com/time-series/autocorrelation-partial-autocorrelation/
+acf(rentals_model$residuals)
+pacf(rentals_model$residuals)
+
+# forecast
+rentals_prediction <- forecast(rentals_model, h = 180, level = 60)
+```
+
+```{r include=TRUE}
+autoplot(rentals_prediction, fcol = "#D4910C", shadecols = "#F9DB9F") +
+  theme_classic() +
+  xlab("month") +
+  ylab("daily rentals") +
+  ggtitle("Forecast of daily rentals for the next 90 days")
+```
+
+## 
+
+Code used for the analysis and creating this presentation can be found on GitHub: <https://github.com/akhileshsivaraman/E-Scooters>
